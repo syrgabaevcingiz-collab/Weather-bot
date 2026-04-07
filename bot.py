@@ -2,7 +2,7 @@ import os
 import logging
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from openai import OpenAI
+
 import requests
 import json
 from functools import wraps
@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = '8209372152:AAEfgr0dA-MlClYfVo3lfLiIZhNGx6RWm9g'
 CHANNEL_USERNAME = '@chekmillion'
 CHANNEL_URL = 'https://t.me/chekmillion'
-# OPENAI_API_KEY уже настроен в переменной окружения
-client = OpenAI()
+
+
 
 # Обработчик команды /start
 def subscription_required(func):
@@ -85,15 +85,16 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Извините, я не понял вашу команду. Пожалуйста, используйте одну из доступных команд: /weather, /location, /advertise.")
 
 async def get_coordinates_from_city(city_name: str) -> tuple[float, float] | None:
-    geocode_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_name}&count=1&language=ru&format=json"
+    nominatim_url = f"https://nominatim.openstreetmap.org/search?q={city_name}&format=json&limit=1"
+    headers = {"User-Agent": "TelegramWeatherBot/1.0"} # Nominatim требует User-Agent
     try:
-        response = requests.get(geocode_url)
+        response = requests.get(nominatim_url, headers=headers)
         response.raise_for_status()
         data = response.json()
-        if data and "results" in data and len(data["results"]) > 0:
-            return data["results"][0]["latitude"], data["results"][0]["longitude"]
+        if data and len(data) > 0:
+            return float(data[0]["lat"]), float(data[0]["lon"])
     except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка при геокодировании города {city_name}: {e}")
+        logger.error(f"Ошибка при геокодировании города {city_name} через Nominatim: {e}")
     return None
 
 async def get_weather_data(latitude: float, longitude: float) -> dict | None:
@@ -121,19 +122,39 @@ async def get_location_info_and_respond(update: Update, context: ContextTypes.DE
         return
 
     try:
-        prompt = f"Расскажи о местности с координатами {latitude}, {longitude} (или городе {city_name if city_name else 'по этим координатам'}). Включи информацию о достопримечательностях, интересных фактах о городе/регионе, что происходит в его местности. Используй эмодзи и сделай ответ интересным и информативным. Максимум 200 слов."
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {"role": "system", "content": "Ты дружелюбный ассистент, который предоставляет интересную информацию о местности."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        location_info = response.choices[0].message.content
-        await update.message.reply_text(location_info)
-    except Exception as e:
-        logger.error(f"Ошибка при генерации информации о местности OpenAI: {e}")
+        # Получаем название города по координатам для запроса в Wikipedia
+        if not city_name:
+            reverse_geocode_url = f"https://nominatim.openstreetmap.org/reverse?lat={latitude}&lon={longitude}&format=json&zoom=10"
+            headers = {"User-Agent": "TelegramWeatherBot/1.0"}
+            reverse_response = requests.get(reverse_geocode_url, headers=headers)
+            reverse_response.raise_for_status()
+            reverse_data = reverse_response.json()
+            city_name = reverse_data.get("address", {}).get("city") or reverse_data.get("address", {}).get("town") or reverse_data.get("address", {}).get("village")
+
+        if not city_name:
+            await update.message.reply_text("Не удалось определить город по указанным координатам.")
+            return
+
+        wikipedia_url = f"https://ru.wikipedia.org/w/api.php?action=query&prop=extracts&exintro&explaintext&redirects=1&format=json&titles={city_name}"
+        wikipedia_response = requests.get(wikipedia_url)
+        wikipedia_response.raise_for_status()
+        wikipedia_data = wikipedia_response.json()
+
+        page = next(iter(wikipedia_data["query"]["pages"].values()))
+        if "extract" in page:
+            location_info = page["extract"]
+            # Ограничиваем длину ответа, чтобы не перегружать пользователя
+            if len(location_info) > 1000:
+                location_info = location_info[:1000] + "... (подробнее на Wikipedia)"
+            await update.message.reply_text(f"Вот что я нашел о {city_name}:\n\n{location_info} 🌍")
+        else:
+            await update.message.reply_text(f"К сожалению, не удалось найти информацию о {city_name} на Wikipedia. 😔")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка при получении информации из Wikipedia: {e}")
         await update.message.reply_text("Произошла ошибка при обработке запроса информации о местности. Пожалуйста, попробуйте позже.")
+    except Exception as e:
+        logger.error(f"Непредвиденная ошибка при обработке информации о местности: {e}")
+        await update.message.reply_text("Произошла непредвиденная ошибка. Пожалуйста, попробуйте позже.")
 
 
 @subscription_required
@@ -177,18 +198,44 @@ async def get_weather_and_respond(update: Update, context: ContextTypes.DEFAULT_
 
     if weather_data:
         try:
-            prompt = f"Напиши краткий и дружелюбный прогноз погоды на сегодня, используя эмодзи, на основе следующих данных: {json.dumps(weather_data, ensure_ascii=False)}. Укажи текущую температуру, ощущаемую температуру, скорость ветра, вероятность осадков и общую сводку. Если есть, укажи название города. Максимум 100 слов."
-            response = client.chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {"role": "system", "content": "Ты дружелюбный ассистент, который предоставляет информацию о погоде."},
-                    {"role": "user", "content": prompt}
-                ]
+            current_weather = weather_data.get("current_weather", {})
+            hourly_data = weather_data.get("hourly", {})
+            daily_data = weather_data.get("daily", {})
+
+            temperature = current_weather.get("temperature")
+            wind_speed = current_weather.get("windspeed")
+            weather_code = current_weather.get("weathercode")
+
+            # Для ощущаемой температуры и вероятности осадков возьмем первое значение из почасовых данных
+            apparent_temperature = hourly_data.get("apparent_temperature", ["N/A"])[0]
+            precipitation_probability = hourly_data.get("precipitation_probability", ["N/A"])[0]
+
+            # Описание погодного кода (упрощенное)
+            weather_descriptions = {
+                0: "Ясно ☀️", 1: "В основном ясно 🌤️", 2: "Переменная облачность ⛅", 3: "Пасмурно ☁️",
+                45: "Туман 🌫️", 48: "Изморозь 🌫️",
+                51: "Легкая морось 🌧️", 53: "Умеренная морось 🌧️", 55: "Интенсивная морось 🌧️",
+                56: "Легкий изморось 🌨️", 57: "Интенсивный изморось 🌨️",
+                61: "Небольшой дождь ☔", 63: "Умеренный дождь ☔", 65: "Сильный дождь 🌧️",
+                66: "Ледяной дождь 🧊", 67: "Сильный ледяной дождь 🧊",
+                71: "Небольшой снегопад 🌨️", 73: "Умеренный снегопад 🌨️", 75: "Сильный снегопад ❄️",
+                77: "Снежные зерна 🌨️",
+                80: "Небольшие ливни  showers ☔", 81: "Умеренные ливни ☔", 82: "Сильные ливни 🌧️",
+                85: "Небольшой снегопад 🌨️", 86: "Сильный снегопад ❄️",
+                95: "Гроза ⛈️", 96: "Гроза с небольшим градом ⛈️", 99: "Гроза с сильным градом ⛈️"
+            }
+            weather_description = weather_descriptions.get(weather_code, "Неизвестно")
+
+            weather_summary = (
+                f"Погода в {city_name if city_name else 'вашем местоположении'}:\n"
+                f"🌡️ Температура: {temperature}°C (ощущается как {apparent_temperature}°C)\n"
+                f"💨 Ветер: {wind_speed} м/с\n"
+                f"☁️ Условия: {weather_description}\n"
+                f"💧 Вероятность осадков: {precipitation_probability}%"
             )
-            weather_summary = response.choices[0].message.content
             await update.message.reply_text(weather_summary)
         except Exception as e:
-            logger.error(f"Ошибка при генерации ответа OpenAI: {e}")
+            logger.error(f"Ошибка при формировании ответа о погоде: {e}")
             await update.message.reply_text("Произошла ошибка при обработке запроса погоды. Пожалуйста, попробуйте позже.")
     else:
         await update.message.reply_text("Не удалось получить данные о погоде. Пожалуйста, попробуйте позже.")
