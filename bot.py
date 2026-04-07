@@ -67,6 +67,7 @@ def main_keyboard():
          InlineKeyboardButton("💱 Курс валют", callback_data="currency")],
         [InlineKeyboardButton("📈 Крипто", callback_data="crypto"),
          InlineKeyboardButton("💼 Бизнес советы", callback_data="business")],
+        [InlineKeyboardButton("📢 Наш канал @chekmillion", url="https://t.me/chekmillion")],
     ])
 
 def back_keyboard():
