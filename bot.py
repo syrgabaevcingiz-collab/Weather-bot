@@ -17,6 +17,10 @@ TELEGRAM_BOT_TOKEN = '8693966108:AAHqOBCH_Byo493EFbRq0Kl3nTawzwOS_wo'
 CHANNEL_USERNAME = '@chekmillion'
 CHANNEL_URL = 'https://t.me/chekmillion'
 
+# ID администратора для получения заявок
+ADMIN_ID = 6826526136
+ADMIN_CONTACT_URL = 'https://t.me/+6826526136'
+
 # OpenAI API
 import os
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
@@ -343,12 +347,37 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if context.user_data.get('awaiting_consultation_details'):
         details = update.message.text
         context.user_data['awaiting_consultation_details'] = False
+        user = update.effective_user
+        username = f"@{user.username}" if user.username else f"ID: {user.id}"
+        
+        # Отправляем заявку администратору
+        try:
+            admin_text = (
+                "🔔 *Новая заявка на консультацию!*\n\n"
+                f"👤 Пользователь: {user.first_name} ({username})\n"
+                f"📋 Данные: {details}\n\n"
+                f"💬 Написать: https://t.me/{user.username}" if user.username else 
+                f"🔔 *Новая заявка на консультацию!*\n\n"
+                f"👤 Пользователь: {user.first_name} (ID: {user.id})\n"
+                f"📋 Данные: {details}"
+            )
+            await context.bot.send_message(ADMIN_ID, admin_text, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Ошибка отправки заявки админу: {e}")
+        
+        # Отправляем пользователю подтверждение + ссылку на связь
+        keyboard = [
+            [InlineKeyboardButton("💬 Написать администратору", url="https://t.me/adm_chek")],
+            [InlineKeyboardButton("📢 Наш канал", url=CHANNEL_URL)],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data='main_menu')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
             f"✅ *Заявка принята!*\n\n"
             f"Твои данные:\n_{details}_\n\n"
-            "Мы свяжемся с тобой в ближайшее время!\n\n"
-            f"А пока подписывайся на канал: {CHANNEL_URL}",
-            reply_markup=await main_menu_keyboard(),
+            "Мы получили твою заявку и скоро свяжемся!\n\n"
+            "А пока можешь написать напрямую нашему администратору 👇",
+            reply_markup=reply_markup,
             parse_mode='Markdown'
         )
     else:
